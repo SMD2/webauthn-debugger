@@ -1,0 +1,22 @@
+{
+    "name": "Webauthn Debugger",
+    "description": "Debug Webauthn API",
+    "version": "1.0",
+    "manifest_version": 3,
+    "content_scripts": [
+        {
+            "matches": ["https://*/*"],
+            "js": ["injection.js"]
+        }
+    ],
+    "permissions":[
+      "tabs",
+      "storage"
+    ],
+    "web_accessible_resources": [
+        {
+          "resources": [ "wrapper.js" ],
+          "matches": [ "https://*/*" ]
+        }
+      ]
+  }
