@@ -33,7 +33,41 @@ let WAD = {
           }
           reader.readAsDataURL(new Blob([arrayBuff]));
         });
-      }
+    },
+    deserializeAssertion: function (assertion){
+        deserializeAssertion(assertion)
+    },
+    serializeAssertion: async function (assertion){
+        try{
+            if (!(
+                assertion.type &&
+                assertion.id &&
+                assertion.rawId &&
+                assertion.response &&
+                assertion.response.clientDataJSON)){
+                    throw new Error('Invalid assertion: ', assertion)
+                }
+            let assertionJson = {
+                type: assertion.type,
+                id: assertion.id,
+                rawId: await arrayBufferToBase64(assertion.rawId),
+                response:{
+                    clientDataJSON: JSON.parse(base64Decode(assertion.response.clientDataJSON)),
+                }
+            }
+            if (assertion.response.userHandle)
+                assertionJson.response.userHandle = await arrayBufferToBase64(assertion.response.userHandle)
+            if (assertion.response.authenticatorData) 
+                assertionJson.response.authenticatorData = await arrayBufferToBase64(assertion.response.authenticatorData)
+            if (assertion.response.attestationObject) 
+                assertionJson.response.attestationObject = CBOR.decode(assertion.response.attestationObject)
+            return assertionJson
+        }catch(e){
+            console.debug('Assertion: ', assertion)
+            console.error(e)
+            return null
+        }
+    }
 
 } 
 
@@ -77,8 +111,69 @@ async function navCredCreateWrapper(webauthnReq){
     let response = await navCredCreateExecuteAndSwap(webauthnReq)
     //let assertionJson = await serializeAssertion(assertion)
     WAD.lastCreateResponse = response
-    console.debug('Create Response:', response)
+    decodeAndPringAttestationResponse (response)
     return response
+}
+
+async function decodeAndPringAttestationResponse(attestationResponse){
+    console.debug("Attestation Response: ", attestationResponse)
+    const clientDataJSONDecoded = JSON.parse(base64Decode(attestationResponse.response.clientDataJSON))
+    attestationResponse.response.clientDataJSON.decoded = clientDataJSONDecoded
+
+    const attestationBuffer = attestationResponse.response.attestationObject
+    const decodedObject = CBOR.decode(attestationBuffer);
+    const authData = decodedObject.authData; 
+    attestationResponse.response.attestationObject = decodedObject
+    
+    let authDataDecoded = {}
+    authDataDecoded.rpIdHash = bytesToHex(authData.slice(0, 32));
+    authDataDecoded.counter = new DataView(authData.slice(33, 37).buffer).getUint32(0, false); // Big-endian
+
+    const flags = authData[32]
+    const flagDetails = {
+        userPresent: (flags & 0x01) !== 0,  
+        userVerified: (flags & 0x04) !== 0,  
+        backupElegibility: (flags & 0x18) >> 3, 
+        backupState: (flags & 0x20) !== 0,
+        attestationDataPesent: (flags & 0x40) !== 0,  
+        extensionDataIncluded: (flags & 0x80) !== 0,   
+        reserved1: (flags & 0x02) !== 0, 
+        reserved2: (flags & 0x38) !== 0, 
+    };
+    authDataDecoded.flags = flagDetails;
+
+    if (flagDetails.attestationDataPesent){
+        let attestedCredentialData = {}
+
+        attestedCredentialData.aaguid = bytesToHex(authData.slice(37, 37 + 16));
+        
+        const credentialIdLength = new DataView(authData.slice(53, 53 + 2).buffer).getUint16(0, false); 
+        attestedCredentialData.credentialId =  bytesToHex(authData.slice(55, 55 + credentialIdLength));
+        
+        const credentialPublicKey = CBOR.decode(authData.slice(55 + credentialIdLength).buffer); 
+        attestedCredentialData.publicKey = parseCosePublicKey(credentialPublicKey);
+
+        authDataDecoded.attestedCredentialData = attestedCredentialData;
+    }
+
+    attestationResponse.response.attestationObject.authData = authDataDecoded
+    console.debug("Attestation Response Decoded: ", attestationResponse)
+}
+
+function parseCosePublicKey(publicKey) {
+    let parsedPublicKey = {};
+    parsedPublicKey.keyType = publicKey[1]; // kty (key type)
+    parsedPublicKey.algorithm = publicKey[3]; // alg (algorithm)
+
+    if (parsedPublicKey.keyType === 2) { // kty == 2 means EC2 key
+        parsedPublicKey.curve = publicKey[-1]; // crv (curve identifier)
+        parsedPublicKey.x = publicKey[-2]; // x-coordinate
+        parsedPublicKey.y = publicKey[-3]; // y-coordinate
+    } else if (parsedPublicKey.keyType === 3) { // RSA Key (kty == 3)
+        parsedPublicKey.modulus = publicKey[-1]; // n (modulus)
+        parsedPublicKey.exponent = publicKey[-2]; // e (exponent)
+    }
+    return parsedPublicKey;
 }
 
 async function serializeWebauthnRequest(request){
@@ -126,9 +221,7 @@ async function serializeAssertion(assertion){
             assertion.id &&
             assertion.rawId &&
             assertion.response &&
-            assertion.response.authenticatorData && 
-            assertion.response.clientDataJSON && 
-            assertion.response.signature)){
+            assertion.response.clientDataJSON)){
                 throw new Error('Invalid assertion: ', assertion)
             }
         let assertionJson = {
@@ -136,12 +229,14 @@ async function serializeAssertion(assertion){
             id: assertion.id,
             rawId: await arrayBufferToBase64(assertion.rawId),
             response:{
-                authenticatorData: await arrayBufferToBase64(assertion.response.authenticatorData),
                 clientDataJSON: await arrayBufferToBase64(assertion.response.clientDataJSON),
-                signature: await arrayBufferToBase64(assertion.response.signature),
                 userHandle: await arrayBufferToBase64(assertion.response.userHandle)
             }
         }
+        if (assertion.response.authenticatorData) 
+            assertion.authenticatorData = await arrayBufferToBase64(assertion.response.authenticatorData)
+        if (assertion.response.attestationObject) 
+            assertion.attestationObject = await arrayBufferToBase64(assertion.response.attestationObject)
         return assertionJson
     }catch(e){
         console.debug('Assertion: ', assertion)
@@ -205,4 +300,20 @@ async function arrayBufferToBase64(arrayBuff) {
     });
   }  
 
+function base64Decode(buffer){
+    if (buffer)
+        return String.fromCharCode.apply(null, new Uint8Array(buffer))
+        .replace(/\+/g, '-') // Convert '+' to '-'
+        .replace(/\//g, '_') // Convert '/' to '_'
+        .replace(/=+$/, ''); // Remove ending '='
+}
 
+function toHexString(byteArray) {
+    return Array.from(byteArray, function(byte) {
+      return ('0' + (byte & 0xFF).toString(16)).slice(-2);
+    }).join('')
+  }
+
+  function bytesToHex(bytes) {
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}

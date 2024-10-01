@@ -17,7 +17,8 @@
       "page": "background.html"
     },
     "web_accessible_resources": [
-      "wrapper.js"
+      "wrapper.js",
+      "cbor.js"
     ]
   }
 
