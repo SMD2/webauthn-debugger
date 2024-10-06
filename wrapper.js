@@ -67,8 +67,52 @@ let WAD = {
             console.error(e)
             return null
         }
-    }
+    },
 
+    decodeAndPrintAttestationResponse: async function (attestationResponse){
+        console.debug("Attestation Response: ", attestationResponse)
+
+        let decodedObject =JSON.parse(JSON.stringify(attestationResponse))
+        decodedObject.response.clientDataJSON = JSON.parse(base64Decode(attestationResponse.response.clientDataJSON))
+    
+        const attestationBuffer = attestationResponse.response.attestationObject
+        decodedObject.response.attestationObject = CBOR.decode(attestationBuffer);
+        
+        const authData = decodedObject.response.attestationObject.authData; 
+        let authDataDecoded = {}
+        authDataDecoded.rpIdHash = bytesToHex(authData.slice(0, 32));
+        authDataDecoded.counter = new DataView(authData.slice(33, 37).buffer).getUint32(0, false); // Big-endian
+    
+        const flags = authData[32]
+        const flagDetails = {
+            userPresent: (flags & 0x01) !== 0,  
+            userVerified: (flags & 0x04) !== 0,  
+            backupElegibility: (flags & 0x18) >> 3, 
+            backupState: (flags & 0x20) !== 0,
+            attestationDataPesent: (flags & 0x40) !== 0,  
+            extensionDataIncluded: (flags & 0x80) !== 0,   
+            reserved1: (flags & 0x02) !== 0, 
+            reserved2: (flags & 0x38) !== 0, 
+        };
+        authDataDecoded.flags = flagDetails;
+    
+        if (flagDetails.attestationDataPesent){
+            let attestedCredentialData = {}
+    
+            attestedCredentialData.aaguid = bytesToHex(authData.slice(37, 37 + 16));
+            
+            const credentialIdLength = new DataView(authData.slice(53, 53 + 2).buffer).getUint16(0, false); 
+            attestedCredentialData.credentialId =  bytesToHex(authData.slice(55, 55 + credentialIdLength));
+            
+            const credentialPublicKey = CBOR.decode(authData.slice(55 + credentialIdLength).buffer); 
+            attestedCredentialData.publicKey = parseCosePublicKey(credentialPublicKey);
+    
+            authDataDecoded.attestedCredentialData = attestedCredentialData;
+        }
+    
+        decodedObject.response.attestationObject.authData = authDataDecoded
+        console.debug("Attestation Response Decoded: ", decodedObject)
+    }
 } 
 
 let originalNavCredGet=navigator.credentials.get
@@ -111,53 +155,8 @@ async function navCredCreateWrapper(webauthnReq){
     let response = await navCredCreateExecuteAndSwap(webauthnReq)
     //let assertionJson = await serializeAssertion(assertion)
     WAD.lastCreateResponse = response
-    decodeAndPringAttestationResponse (response)
+    WAD.decodeAndPrintAttestationResponse (response)
     return response
-}
-
-async function decodeAndPringAttestationResponse(attestationResponse){
-    console.debug("Attestation Response: ", attestationResponse)
-    const clientDataJSONDecoded = JSON.parse(base64Decode(attestationResponse.response.clientDataJSON))
-    attestationResponse.response.clientDataJSON.decoded = clientDataJSONDecoded
-
-    const attestationBuffer = attestationResponse.response.attestationObject
-    const decodedObject = CBOR.decode(attestationBuffer);
-    const authData = decodedObject.authData; 
-    attestationResponse.response.attestationObject = decodedObject
-    
-    let authDataDecoded = {}
-    authDataDecoded.rpIdHash = bytesToHex(authData.slice(0, 32));
-    authDataDecoded.counter = new DataView(authData.slice(33, 37).buffer).getUint32(0, false); // Big-endian
-
-    const flags = authData[32]
-    const flagDetails = {
-        userPresent: (flags & 0x01) !== 0,  
-        userVerified: (flags & 0x04) !== 0,  
-        backupElegibility: (flags & 0x18) >> 3, 
-        backupState: (flags & 0x20) !== 0,
-        attestationDataPesent: (flags & 0x40) !== 0,  
-        extensionDataIncluded: (flags & 0x80) !== 0,   
-        reserved1: (flags & 0x02) !== 0, 
-        reserved2: (flags & 0x38) !== 0, 
-    };
-    authDataDecoded.flags = flagDetails;
-
-    if (flagDetails.attestationDataPesent){
-        let attestedCredentialData = {}
-
-        attestedCredentialData.aaguid = bytesToHex(authData.slice(37, 37 + 16));
-        
-        const credentialIdLength = new DataView(authData.slice(53, 53 + 2).buffer).getUint16(0, false); 
-        attestedCredentialData.credentialId =  bytesToHex(authData.slice(55, 55 + credentialIdLength));
-        
-        const credentialPublicKey = CBOR.decode(authData.slice(55 + credentialIdLength).buffer); 
-        attestedCredentialData.publicKey = parseCosePublicKey(credentialPublicKey);
-
-        authDataDecoded.attestedCredentialData = attestedCredentialData;
-    }
-
-    attestationResponse.response.attestationObject.authData = authDataDecoded
-    console.debug("Attestation Response Decoded: ", attestationResponse)
 }
 
 function parseCosePublicKey(publicKey) {
